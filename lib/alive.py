@@ -114,7 +114,7 @@ class Alive():
 
                     INSERT
                     {
-                        ?subject wso:alive \"""" + date + """\" .
+                        ?subject wso:alive \"""" + date + """\"^^xsd:date .
                     }
                     WHERE
                     {
