@@ -120,11 +120,13 @@ class Alive():
                     {
                         ?subject wso:BaseURL \"""" + url + """\" .
                     }"""
-                print url
+                logger.info("UPDATING: " + url)
                 self.store.update(sparql_update_query)
                 self.counter += 1
+            else:
+                logger.warn("WARNING: " + url + " is missing or not available")
         except Exception as e:
-            print type(e)
+            logger.error(type(e) + " failed for: " + url)
             return None
 
     def populate(self):
@@ -135,6 +137,7 @@ class Alive():
         '''
         with futures.ThreadPoolExecutor(max_workers=8) as executor:
             workload = executor.map(self.fetch_url, self.get_urls())
+        return workload
 
     def update(self):
         '''
@@ -147,9 +150,13 @@ class Alive():
 def main():
     alive = Alive("http://54.69.87.196:8080/parliament/sparql")
     alive.populate()
-    print "Updating: " + str(len(alive.get_urls())) + " URLs"
+    updating_msg = "Updating: " + str(len(alive.get_urls())) + " URLs"
+    logger.info(updating_msg)
+    print updating_msg
     alive.update()
-    print "Updated: " + str(alive.counter) + " URLs as alive!"
+    updated_msg = "Updated: " + str(alive.counter) + " URLs as alive!"
+    logger.info(updated_msg)
+    print updated_msg
 
 
 if __name__ == '__main__':
