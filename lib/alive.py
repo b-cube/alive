@@ -98,7 +98,7 @@ class Alive():
         Note: There should be a way to update the triples using multithreading.
         '''
         try:
-            date = time.strftime("%d/%m/%Y")
+            date = time.strftime("%Y-%m-%d")
             if status in [200, 400]:
                 sparql_update_query = """
                     DELETE
