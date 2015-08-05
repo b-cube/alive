@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 
-from rdflib import Graph, Namespace, URIRef
-from rdflib.plugins.stores import sparqlstore
-from rdflib.namespace import DCTERMS
 from datetime import timedelta
+from sparqldb import SparqlDB
 from optparse import OptionParser
 import requests
 import time
+import datetime
 import concurrent.futures as futures
 import logging
 
@@ -17,83 +16,54 @@ console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
 console.setFormatter(formatter)
-
 logger = logging.getLogger(__name__)
 logger.addHandler(console)
 
 
-class Store():
-    '''
-    This class is a wrapper for the Graph class that
-    handles ontology binding and triples serialization.
-    '''
-
-    def __init__(self, endpoint=None):
-        if endpoint is None:
-            self.g = Graph()
-        else:
-            self._store = sparqlstore.SPARQLUpdateStore(endpoint, endpoint)
-            self.g = Graph(self._store, URIRef('urn:x-arq:DefaultGraph'))
-        self.ns = {}
-
-    def bind_namespaces(self, namespaces):
-        for ns in namespaces:
-            # ns is the prefix and the key
-            self.g.bind(ns, Namespace(namespaces[ns]))
-            self.ns[ns] = Namespace(namespaces[ns])
-
-    def get_namespaces(self):
-        ns = []
-        for namespace in self.g.namespaces():
-            ns.append(namespace)
-        return ns
-
-    def serialize(self, format):
-        return self.g.serialize(format=format)
-
-    def update(self, query):
-        return self.g.update(query)
-
-    def query(self, query):
-        return self.g.query(query)
-
-
 class Alive():
     '''
-    This class will update triples based on url availability
+    Loads all the URLs from a triples store where the URL
+    is part of vcard:hasURL and creates a JSON object
+    with all the response codes returned from these URLs
     '''
 
     def __init__(self, endpoint):
-        self.timeout = 1
+        """
+        :param endpoint: Sparql endpoint
+        :return: Alive class instance
+        """
+        self.timeout = 1  # in seconds for the requests
+        self.conn = SparqlDB(endpoint)
+        self.conn.add_prefix('vcard','http://www.w3.org/TR/vcard-rdf/#')
         self.status = []
         self.urls = []
         self.response_counts = {}
-        self.store = Store(endpoint)
-        ontology_uris = {
-            'wso': 'http://purl.org/nsidc/bcube/web-services#',
-            'prov': 'http://www.w3.org/ns/prov#',
-            'vcard': 'http://www.w3.org/TR/vcard-rdf/#',
-            'http': 'http://www.w3.org/2011/http#',
-            'dc': str(DCTERMS)
+        self.status_family = {
+            '100': 'Informational message',
+            '200': 'Success message',
+            '300': 'Redirected message',
+            '400': 'Client error',
+            '500': 'Server error'
         }
-        self.store.bind_namespaces(ontology_uris)
-        start = time.time()
-        qres = self.store.query("""SELECT  DISTINCT ?base_url
-                        WHERE {
-                                ?subject vcard:hasURL ?base_url .
-                                FILTER regex(?base_url, "noaa", "i")
-                        }
-                        """)
-        end = time.time()
-        elapsed = end - start
+
+    def load_urls(self, sparql_query):
+        try:
+            start = time.time()
+            qres = self.conn.query(sparql_query)
+            end = time.time()
+            elapsed = end - start
+        except RuntimeError:
+            logger.error("The URLs couldn't be loaded, check that the SPARQL endpoint exist and it's accessible.")
+            return None
+        res = qres['bindings']
         logger.info(
             "The Sparql endpoint returned {0} URLs, query time: {1}".format(
-                str(len(qres)),
+                str(len(res)),
                 str(timedelta(seconds=elapsed)))
         )
-        for row in qres:
-            self.urls.append(str(row[0].n3()[1:-1]))
-        qres = None
+        for row in res:
+            # do we really need unicode?
+            self.urls.append(str(row['base_url']['value']))
 
     def get_urls(self):
         return self.urls
@@ -101,68 +71,48 @@ class Alive():
     def url_status(self):
         return self.status
 
+    def build_json_response(self, response, url):
+        status_family_code = response.status_code
+        status_family_code -= status_family_code % 100
+        status_family_type = self.status_family[str(status_family_code)]
+        if len(response.history) > 0:
+            current_url = response.url
+        else:
+            current_url = ''
+
+        r = {
+            'url': url,
+            'checked_on': datetime.datetime.now().isoformat(),
+            'status_code': response.status_code,
+            'status_message': response.reason,
+            'status_family': status_family_type,
+            'status_family_code': status_family_code,
+            'response_time': response.elapsed.microseconds,
+            'redirect_url': current_url
+        }
+        return r
+
     def fetch_url(self, url):
         try:
-            status = requests.head(url, timeout=self.timeout).status_code
-        except Exception:
-            status = 500
-        status_tuple = (url, status)
-        # This is 'thread-safe' thanks to the Python GIL
-        self.status.append(status_tuple)
+            response = requests.head(url, timeout=self.timeout)
+            status = response.reason.upper()
+            res = self.build_json_response(response, url)
+        except Exception, e:
+            res = {
+                'url': url,
+                'error_code': 900,
+                'checked_on': datetime.datetime.now().isoformat(),
+                'error_message': str(e)
+            }
+            status = response.reason.upper()
+        # This is thread-safe thanks to the Python GIL
+        self.status.append(res)
         if str(status) in self.response_counts:
             self.response_counts[str(status)] += 1
         else:
             self.response_counts[str(status)] = 1
         logger.debug("Appended: " + url + " with response code: " + str(status))
-        return status
-
-    def delete_response_triples(self):
-        '''
-        Deletes all the triples related to the last time the URLs were checked.
-        :return: None
-        '''
-        try:
-            date = time.strftime("%Y-%m-%d")
-            sparql_delete_query = """
-                DELETE
-                {
-                ?s ?p ?o
-                }
-                WHERE
-                {
-                ?s prov:atTime ?o .
-                ?s ?p ?o .
-                };
-
-                DELETE
-                {
-                ?s ?p ?o
-                }
-                WHERE
-                {
-                ?s http:statusCodeValue ?o .
-                ?s ?p ?o .
-                };
-            """
-            logger.info("Deleting response triples")
-            self.store.update(sparql_delete_query)
-        except Exception as e:
-            logger.error(type(e) + " ERROR DELETING RESPONSE TRIPLES")
-            return None
-
-
-    def update_statuses(self, sparql_update_query):
-        '''
-        This class updates a triple refering to a URL on when was the last time
-        that returned a 200 or 400, both indicate that the service is there.
-
-        Note: There should be a way to update the triples using multithreading.
-        '''
-        try:
-            self.store.update(sparql_update_query)
-        except Exception as e:
-            logger.error(type(e) + " ERROR INSERTING RESPONSE TRIPLES")
-            return None
+        return res
 
     def populate(self, fetcher_threads, timeout):
         '''
@@ -174,27 +124,6 @@ class Alive():
         with futures.ThreadPoolExecutor(max_workers=fetcher_threads) as executor:
             workload = executor.map(self.fetch_url, self.get_urls())
         return workload
-
-    def update(self):
-        '''
-        Updates the status of the URLs with the latest HTTP response code.
-        '''
-        sparql_update_query = ""
-        date = time.strftime("%Y-%m-%d")
-        for i in range(0, len(self.url_status()), 100):
-            template = """
-                INSERT
-                {
-                    ?subject prov:atTime \"%s\"^^xsd:date .
-                    ?subject http:statusCodeValue \"%s\"^^xsd:integer .
-                }
-                WHERE
-                {
-                    ?subject vcard:hasURL \"%s\" .
-                };"""
-
-            paginated_update = "\n".join([template % (date, v, k) for (k, v) in self.url_status()[i:i + 100]])
-            self.update_statuses(paginated_update)
 
 
 def main():
@@ -229,6 +158,12 @@ def main():
         timeout = 10  # if the timeout is more than 10 seconds this will never end.
 
     alive = Alive(options.sparql)
+    query = """SELECT  DISTINCT ?base_url
+                            WHERE {
+                                    ?subject vcard:hasURL ?base_url .
+                            }
+                            """
+    alive.load_urls(query)
     if len(alive.urls) > 1:
         start = time.time()
         alive.populate(threads, timeout)
@@ -239,16 +174,9 @@ def main():
             str(timedelta(seconds=elapsed))
         )
         logger.info(msg)
-        counts = ["URLs that responded HTTP %s: %s" % (k, v) for (k, v) in alive.response_counts.iteritems()]
+        counts = ["URLs with HTTP status (%s): %s" % (k, v) for (k, v) in alive.response_counts.iteritems()]
         for response in counts:
             logger.info(response)
-        alive.delete_response_triples()
-        start = time.time()
-        alive.update()
-        end = time.time()
-        elapsed = end - start
-        msg = "Triple store updated, update query time: " + str(timedelta(seconds=elapsed))
-        logger.info(msg)
     else:
         msg = "No URLs were returned by the sparql endpoint"
         logger.info(msg)
