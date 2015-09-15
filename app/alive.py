@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 from datetime import timedelta
-from sparqldb import SparqlDB
 from optparse import OptionParser
 import requests
 import time
@@ -33,8 +32,7 @@ class Alive():
         :return: Alive class instance
         """
         self.timeout = 1  # in seconds for the requests
-        self.conn = SparqlDB(endpoint)
-        self.conn.add_prefix('vcard','http://www.w3.org/TR/vcard-rdf/#')
+        self.endpoint = endpoint
         self.status = []
         self.urls = []
         self.response_counts = {}
@@ -46,30 +44,51 @@ class Alive():
             '500': 'Server error'
         }
 
-    def load_urls(self, sparql_query):
+    def load_urls(self):
         try:
+            page = 0
             start = time.time()
-            qres = self.conn.query(sparql_query)
+            while (True):
+                page += 1
+                req_url = self.endpoint + '/p/{0}'.format(page)
+                qres = requests.get(req_url)
+                data = qres.json()
+                if len(data['urls']) <= 0:
+                    break
+                for row in data['urls']:
+                    # do we really need unicode?
+                    self.urls.append(str(row['base_url']['value']))
             end = time.time()
             elapsed = end - start
         except RuntimeError:
-            logger.error("The URLs couldn't be loaded, check that the SPARQL endpoint exist and it's accessible.")
+            logger.error("The URLs couldn't be loaded")
             return None
-        res = qres['bindings']
+
         logger.info(
             "The Sparql endpoint returned {0} URLs, query time: {1}".format(
-                str(len(res)),
+                str(len(self.urls)),
                 str(timedelta(seconds=elapsed)))
         )
-        for row in res:
-            # do we really need unicode?
-            self.urls.append(str(row['base_url']['value']))
 
     def get_urls(self):
         return self.urls
 
     def url_status(self):
         return self.status
+
+    def build_error_response(self, url, error):
+        r = {
+            'url': url,
+            'checked_on': datetime.datetime.now().isoformat(),
+            'status_code': 408,
+            'status_message': 'ERROR',
+            'status_family_type': 'Client error',
+            'status_family_code': 400,
+            'response_time': '0',
+            'redirect_url': '',
+            'error': error
+        }
+        return r
 
     def build_json_response(self, response, url):
         status_family_code = response.status_code
@@ -85,10 +104,11 @@ class Alive():
             'checked_on': datetime.datetime.now().isoformat(),
             'status_code': response.status_code,
             'status_message': response.reason,
-            'status_family': status_family_type,
+            'status_family_type': status_family_type,
             'status_family_code': status_family_code,
             'response_time': response.elapsed.microseconds,
-            'redirect_url': current_url
+            'redirect_url': current_url,
+            'error': ''
         }
         return r
 
@@ -98,15 +118,12 @@ class Alive():
             status = response.reason.upper()
             res = self.build_json_response(response, url)
         except Exception, e:
-            res = {
-                'url': url,
-                'error_code': 900,
-                'checked_on': datetime.datetime.now().isoformat(),
-                'error_message': str(e)
-            }
-            status = response.reason.upper()
+            res = self.build_error_response(url, str(e))
+            status = 'TIMED OUT'
         # This is thread-safe thanks to the Python GIL
         self.status.append(res)
+        if status == '':
+            status = 'EMPTY RESPONSE'
         if str(status) in self.response_counts:
             self.response_counts[str(status)] += 1
         else:
@@ -125,10 +142,18 @@ class Alive():
             workload = executor.map(self.fetch_url, self.get_urls())
         return workload
 
+    def update_urls(self):
+        """
+        This method updates the status of the URLs in the triple store
+        :return: 200 if successful
+        """
+        post_res = requests.post(self.endpoint, json=self.status)
+        logger.debug("Updated URLS with response code: " + str(post_res.status_code))
+
 
 def main():
     p = OptionParser()
-    p.add_option('--sparql', '-s', help='The Sparql endpoint we want to update')
+    p.add_option('--api', '-a', help='REST endpoint, this is where the URLs statuses are updated in the triple store')
     p.add_option('--workers', '-w', help='Number of threads used to check the URLs status', default=8, type="int")
     p.add_option('--timeout', '-t', help='Number of seconds to wait for an HTTP response', default=1, type="int")
     p.add_option('--verbose', '-v', help='Increases the output verbosity', action='store_true')
@@ -141,8 +166,8 @@ def main():
     else:
         logger.setLevel(logging.INFO)
 
-    if options.sparql is None:
-        print ("Missing SPARQL endpoint")
+    if options.api is None:
+        print ("Missing BCube REST endpoint")
         p.print_help()
         exit(1)
 
@@ -157,13 +182,8 @@ def main():
     if timeout > 10:
         timeout = 10  # if the timeout is more than 10 seconds this will never end.
 
-    alive = Alive(options.sparql)
-    query = """SELECT  DISTINCT ?base_url
-                            WHERE {
-                                    ?subject vcard:hasURL ?base_url .
-                            }
-                            """
-    alive.load_urls(query)
+    alive = Alive(options.api)
+    alive.load_urls()
     if len(alive.urls) > 1:
         start = time.time()
         alive.populate(threads, timeout)
@@ -174,6 +194,7 @@ def main():
             str(timedelta(seconds=elapsed))
         )
         logger.info(msg)
+        alive.update_urls()
         counts = ["URLs with HTTP status (%s): %s" % (k, v) for (k, v) in alive.response_counts.iteritems()]
         for response in counts:
             logger.info(response)
