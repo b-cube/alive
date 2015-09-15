@@ -10,7 +10,7 @@ Overview
 -------------------
 
 The BCube triple store contains triples describing datasets and web services, this tool updates the status of these urls.
-If the URL is alive for subject ?s then this tool will send an INSERT request to the triple store as follows:
+If the URL is alive for subject ?s then this tool will send a request to the BCUBE INSERT request to the triple store as follows:
 
 ```sql
 INSERT
@@ -60,17 +60,17 @@ Usage
 
 
 ```sh
-python $PATH/TO/alive.py -s [http://SPARQL-ENDPOINT] -w [thread-number] -t [timeout for a URL] -v [verbose]
+python $PATH/TO/alive.py -s [http://BCUBE-ENDPOINT] -w [thread-number] -t [timeout for a URL] -v [verbose]
 ```
 
 example:
 
 ```sh
-python app/alive -s http://dummy.com/sparql -w 8 -t 2
+python app/alive -a http://rest-endpoint/graph/dev -w 8 -t 2
 ```
 
-this will query which URLs are in the http://dummy.com/sparql endpoint and will use up to 8 workers to request 
-HTTP responses on the URLs. Each request will have a max timeout of 2 seconds.
+this will query which URLs are in the http://rest-endpoint/graph/dev endpoint(graph dev) and will use up to 8 workers to request 
+HTTP responses on these URLs. Each request will have a max timeout of 2 seconds.
 
 * NOTE: The timeout parameter can affect how many HTTP 200 responses we get, if we set it too low we'll get a lot of 500s due
 remote server speeds and/or a poor local machine performance. 2 seconds worked fine in a 2 core laptop with low bandwidth.
@@ -79,10 +79,8 @@ remote server speeds and/or a poor local machine performance. 2 seconds worked f
 
 TODO
 ----------------
-* Write tests for the sparql queries
 * Create a profiler script
 * Dockerize the app
-
 
 
 [License GPL v3](LICENSE)
