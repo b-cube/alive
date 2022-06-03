@@ -1,6 +1,6 @@
 CProfileV==1.0.6
 argparse==1.2.1
-bottle==0.12.8
+bottle==0.12.20
 cffi==1.1.2
 cookies==2.2.1
 cryptography==0.9.3
